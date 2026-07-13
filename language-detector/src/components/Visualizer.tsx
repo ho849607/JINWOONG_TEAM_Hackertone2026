@@ -1,72 +1,72 @@
 import React, { useEffect, useRef } from 'react';
 
-export default function Visualizer({ stream, isActive }: { stream: MediaStream | null, isActive: boolean }) {
+export default function Visualizer({ stream, isActive }: { stream: MediaStream | null; isActive: boolean }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const animationRef = useRef<number>();
-  const analyserRef = useRef<AnalyserNode | null>(null);
 
   useEffect(() => {
-    if (!stream || !canvasRef.current || !isActive) return;
+    const canvas = canvasRef.current;
+    if (!stream || !canvas || !isActive) return;
 
-    // Use standard AudioContext
-    const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+    const AudioContextClass = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
     if (!AudioContextClass) return;
 
-    const audioCtx = new AudioContextClass();
-    const analyser = audioCtx.createAnalyser();
-    analyser.fftSize = 64;
-    analyserRef.current = analyser;
+    const audioContext = new AudioContextClass();
+    const analyser = audioContext.createAnalyser();
+    const source = audioContext.createMediaStreamSource(stream);
+    const values = new Uint8Array(analyser.frequencyBinCount);
+    const context = canvas.getContext('2d');
+    let animationFrame = 0;
 
-    const source = audioCtx.createMediaStreamSource(stream);
+    analyser.fftSize = 128;
     source.connect(analyser);
+    void audioContext.resume();
 
-    const canvas = canvasRef.current;
-    const ctx = canvas.getContext('2d')!;
-    
-    const bufferLength = analyser.frequencyBinCount;
-    const dataArray = new Uint8Array(bufferLength);
-
-    const draw = () => {
-      animationRef.current = requestAnimationFrame(draw);
-      analyser.getByteFrequencyData(dataArray);
-
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-      const barWidth = (canvas.width / bufferLength) * 1.5;
-      let x = 0;
-
-      for (let i = 0; i < bufferLength; i++) {
-        const barHeight = (dataArray[i] / 255) * canvas.height;
-        
-        // Draw rounded rect
-        ctx.fillStyle = '#06b6d4'; // Cyan-500
-        ctx.beginPath();
-        ctx.roundRect(x, canvas.height - barHeight, barWidth - 4, Math.max(barHeight, 4), 4);
-        ctx.fill();
-
-        x += barWidth;
-      }
+    const resize = () => {
+      const rect = canvas.getBoundingClientRect();
+      const ratio = Math.min(window.devicePixelRatio || 1, 2);
+      canvas.width = Math.max(1, Math.floor(rect.width * ratio));
+      canvas.height = Math.max(1, Math.floor(rect.height * ratio));
     };
 
+    const draw = () => {
+      if (!context) return;
+      analyser.getByteTimeDomainData(values);
+      context.clearRect(0, 0, canvas.width, canvas.height);
+      context.lineWidth = Math.max(2, canvas.width / 500);
+      context.strokeStyle = '#22d3ee';
+      context.beginPath();
+
+      const sliceWidth = canvas.width / values.length;
+      values.forEach((value, index) => {
+        const x = index * sliceWidth;
+        const y = (value / 255) * canvas.height;
+        if (index === 0) context.moveTo(x, y);
+        else context.lineTo(x, y);
+      });
+
+      context.stroke();
+      animationFrame = window.requestAnimationFrame(draw);
+    };
+
+    resize();
+    window.addEventListener('resize', resize);
     draw();
 
     return () => {
-      if (animationRef.current) cancelAnimationFrame(animationRef.current);
-      if (audioCtx.state !== 'closed') {
-        audioCtx.close().catch(console.error);
-      }
+      window.removeEventListener('resize', resize);
+      window.cancelAnimationFrame(animationFrame);
+      source.disconnect();
+      if (audioContext.state !== 'closed') void audioContext.close();
     };
   }, [stream, isActive]);
 
   return (
-    <div className="bg-[#f8fafc] rounded-xl sm:rounded-2xl p-4 sm:p-6 shadow-sm border border-slate-100">
-      <div className="flex justify-between items-center mb-4 sm:mb-6">
-        <h3 className="text-slate-600 font-bold tracking-wider text-xs sm:text-sm">SIGNAL STRENGTH</h3>
-        <span className="text-cyan-500 font-mono text-xs sm:text-sm tracking-widest">{isActive ? 'ACTIVE' : 'STANDBY'}</span>
+    <div className="rounded-2xl border border-slate-700 bg-slate-950/70 p-4">
+      <div className="mb-3 flex items-center justify-between text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">
+        <span>Voice signal</span>
+        <span className={isActive ? 'text-cyan-300' : 'text-slate-600'}>{isActive ? 'Recording' : 'Standby'}</span>
       </div>
-      <div className="h-16 sm:h-32 w-full flex items-end justify-center">
-        <canvas ref={canvasRef} width={400} height={128} className="w-full h-full object-contain" />
-      </div>
+      <canvas ref={canvasRef} className="h-24 w-full rounded-xl bg-slate-900" aria-label="실시간 음성 파형" />
     </div>
   );
 }

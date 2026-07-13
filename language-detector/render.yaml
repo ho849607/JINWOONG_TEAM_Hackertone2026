@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: voice-lens
+    runtime: node
+    plan: free
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash
+      - key: VOICE_DETECTOR_URL
+        sync: false
+      - key: VOICE_DETECTOR_TOKEN
+        sync: false
+      - key: ACCENT_CLASSIFIER_URL
+        sync: false
+      - key: ACCENT_CLASSIFIER_TOKEN
+        sync: false

@@ -1,12 +1,12 @@
 {
-  "name": "react-example",
+  "name": "voxshield-voice-lens",
   "private": true,
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "streamlit run app.py --server.port 3000 --server.address 0.0.0.0",
-    "build": "DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y -o Dpkg::Options::=\"--force-confdef\" -o Dpkg::Options::=\"--force-confold\" python3-pip && pip3 install -r requirements.txt --break-system-packages",
-    "start": "streamlit run app.py --server.port 3000 --server.address 0.0.0.0",
+    "dev": "tsx server.ts",
+    "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
+    "start": "node dist/server.cjs",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit"
@@ -15,12 +15,10 @@
     "@google/genai": "^2.4.0",
     "@tailwindcss/vite": "^4.1.14",
     "@vitejs/plugin-react": "^5.0.4",
-    "dotenv": "^17.2.3",
     "express": "^4.21.2",
     "express-rate-limit": "^8.5.2",
     "helmet": "^8.2.0",
     "lucide-react": "^0.546.0",
-    "motion": "^12.23.24",
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
     "vite": "^6.2.3"
