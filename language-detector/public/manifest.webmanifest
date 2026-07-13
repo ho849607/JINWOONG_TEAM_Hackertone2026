@@ -1,0 +1,13 @@
+{
+  "name": "Voice Lens 음성 언어 감지기",
+  "short_name": "Voice Lens",
+  "description": "음성을 녹음하거나 업로드해 언어와 받아쓰기를 분석합니다.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#020617",
+  "theme_color": "#020617",
+  "lang": "ko",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
