@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   AlertCircle,
+  AudioLines,
   Bot,
   CheckCircle2,
   Clock3,
@@ -56,6 +57,7 @@ interface BeforeInstallPromptEvent extends Event {
 const MAX_RECORD_SECONDS = 30;
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
 const API_TIMEOUT_MS = 60_000;
+const NOISE_FOCUS_STORAGE_KEY = 'voxshield-noise-focus';
 
 const MIME_TYPE_CANDIDATES = [
   'audio/webm;codecs=opus',
@@ -87,6 +89,41 @@ function blobToBase64(blob: Blob) {
   });
 }
 
+function buildNoiseFocusedStream(input: MediaStream) {
+  const AudioContextClass = window.AudioContext;
+  if (!AudioContextClass) return null;
+
+  const context = new AudioContextClass();
+  const source = context.createMediaStreamSource(input);
+  const highPass = context.createBiquadFilter();
+  const presence = context.createBiquadFilter();
+  const lowPass = context.createBiquadFilter();
+  const compressor = context.createDynamicsCompressor();
+  const destination = context.createMediaStreamDestination();
+
+  highPass.type = 'highpass';
+  highPass.frequency.value = 90;
+  highPass.Q.value = 0.7;
+
+  presence.type = 'peaking';
+  presence.frequency.value = 2_500;
+  presence.Q.value = 0.8;
+  presence.gain.value = 2.5;
+
+  lowPass.type = 'lowpass';
+  lowPass.frequency.value = 7_500;
+  lowPass.Q.value = 0.7;
+
+  compressor.threshold.value = -35;
+  compressor.knee.value = 20;
+  compressor.ratio.value = 4;
+  compressor.attack.value = 0.003;
+  compressor.release.value = 0.25;
+
+  source.connect(highPass).connect(presence).connect(lowPass).connect(compressor).connect(destination);
+  return { context, stream: destination.stream };
+}
+
 function statusMessage(status: number, fallback?: string) {
   if (status === 400) return fallback || '오디오 요청이 올바르지 않습니다.';
   if (status === 413) return '오디오가 너무 큽니다. 더 짧게 녹음해 주세요.';
@@ -104,9 +141,19 @@ export default function App() {
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null);
   const [showIosInstallHelp, setShowIosInstallHelp] = useState(false);
+  const [noiseFocusEnabled, setNoiseFocusEnabled] = useState(() => {
+    try {
+      return localStorage.getItem(NOISE_FOCUS_STORAGE_KEY) !== 'off';
+    } catch {
+      return true;
+    }
+  });
+  const [noiseFocusFallback, setNoiseFocusFallback] = useState(false);
 
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const rawStreamRef = useRef<MediaStream | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const countdownRef = useRef<number | null>(null);
   const requestAbortRef = useRef<AbortController | null>(null);
@@ -123,8 +170,16 @@ export default function App() {
   };
 
   const releaseStream = () => {
-    streamRef.current?.getTracks().forEach((track) => track.stop());
+    const tracks = new Set<MediaStreamTrack>([
+      ...(streamRef.current?.getTracks() ?? []),
+      ...(rawStreamRef.current?.getTracks() ?? []),
+    ]);
+    tracks.forEach((track) => track.stop());
     streamRef.current = null;
+    rawStreamRef.current = null;
+    const context = audioContextRef.current;
+    audioContextRef.current = null;
+    if (context && context.state !== 'closed') void context.close();
     setStream(null);
   };
 
@@ -171,6 +226,7 @@ export default function App() {
         body: JSON.stringify({
           audioBase64,
           mimeType: audio.type || 'audio/webm',
+          noiseFocus: noiseFocusEnabled,
         }),
         signal: abortController.signal,
       });
@@ -234,6 +290,7 @@ export default function App() {
 
     setError(null);
     setResult(null);
+    setNoiseFocusFallback(false);
 
     if (!window.isSecureContext && location.hostname !== 'localhost') {
       setError('마이크는 HTTPS 주소에서만 사용할 수 있습니다.');
@@ -252,24 +309,43 @@ export default function App() {
     try {
       const mediaStream = await navigator.mediaDevices.getUserMedia({
         audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
+          echoCancellation: noiseFocusEnabled,
+          noiseSuppression: noiseFocusEnabled,
+          autoGainControl: noiseFocusEnabled,
+          channelCount: 1,
         },
       });
+
+      rawStreamRef.current = mediaStream;
+      let recordingStream = mediaStream;
+      if (noiseFocusEnabled) {
+        try {
+          const focused = buildNoiseFocusedStream(mediaStream);
+          if (focused) {
+            audioContextRef.current = focused.context;
+            if (focused.context.state === 'suspended') await focused.context.resume();
+            recordingStream = focused.stream;
+          } else {
+            setNoiseFocusFallback(true);
+          }
+        } catch (focusError) {
+          console.warn('Noise focus processing is unavailable; using browser suppression only.', focusError);
+          setNoiseFocusFallback(true);
+        }
+      }
 
       const mimeType = getSupportedMimeType();
       let recorder: MediaRecorder;
       try {
-        recorder = mimeType ? new MediaRecorder(mediaStream, { mimeType }) : new MediaRecorder(mediaStream);
+        recorder = mimeType ? new MediaRecorder(recordingStream, { mimeType }) : new MediaRecorder(recordingStream);
       } catch {
-        recorder = new MediaRecorder(mediaStream);
+        recorder = new MediaRecorder(recordingStream);
       }
 
       chunksRef.current = [];
-      streamRef.current = mediaStream;
+      streamRef.current = recordingStream;
       recorderRef.current = recorder;
-      setStream(mediaStream);
+      setStream(recordingStream);
       setRemainingSeconds(MAX_RECORD_SECONDS);
 
       recorder.ondataavailable = (event) => {
@@ -373,6 +449,14 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    try {
+      localStorage.setItem(NOISE_FOCUS_STORAGE_KEY, noiseFocusEnabled ? 'on' : 'off');
+    } catch {
+      // 비공개 모드 등 저장소를 사용할 수 없는 환경에서는 현재 세션 설정만 유지합니다.
+    }
+  }, [noiseFocusEnabled]);
+
+  useEffect(() => {
     const handleVisibility = () => {
       if (document.hidden && recorderRef.current?.state === 'recording') finishRecording();
     };
@@ -433,6 +517,39 @@ export default function App() {
                 녹음은 분석할 때만 전송되며 서버에 저장하지 않습니다. AI 음성 판별 모델이 연결된 경우 확률 기반 참고 결과도 함께 표시합니다.
               </p>
             </div>
+
+            <div className="mb-5 flex items-center justify-between gap-4 rounded-2xl border border-cyan-900/70 bg-slate-950/60 p-4">
+              <div className="flex min-w-0 items-start gap-3">
+                <span className={`mt-0.5 grid h-9 w-9 shrink-0 place-items-center rounded-xl ${noiseFocusEnabled ? 'bg-cyan-400/15 text-cyan-300' : 'bg-slate-800 text-slate-500'}`}>
+                  <AudioLines className="h-5 w-5" aria-hidden="true" />
+                </span>
+                <div>
+                  <p className="font-bold text-slate-100">노이즈 포커스</p>
+                  <p className="mt-1 text-xs leading-5 text-slate-400">
+                    {noiseFocusEnabled
+                      ? '주변 소음과 울림을 줄이고 전경의 말소리에 집중합니다.'
+                      : '입력 음성을 별도 보정 없이 분석합니다.'}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={noiseFocusEnabled}
+                aria-label="노이즈 포커스 모드"
+                onClick={() => setNoiseFocusEnabled((enabled) => !enabled)}
+                disabled={isBusy || isRecording}
+                className={`relative h-8 w-14 shrink-0 rounded-full transition focus:outline-none focus:ring-2 focus:ring-cyan-300 disabled:cursor-not-allowed disabled:opacity-50 ${noiseFocusEnabled ? 'bg-cyan-400' : 'bg-slate-700'}`}
+              >
+                <span className={`absolute top-1 h-6 w-6 rounded-full bg-white shadow transition-transform ${noiseFocusEnabled ? 'translate-x-0 left-7' : 'left-1 translate-x-0'}`} />
+              </button>
+            </div>
+
+            {noiseFocusFallback && isRecording && (
+              <p className="mb-4 text-center text-xs text-amber-300" role="status">
+                이 브라우저에서는 기본 소음 억제 기능으로 녹음하고 있어요.
+              </p>
+            )}
 
             <Visualizer stream={stream} isActive={isRecording} />
 
